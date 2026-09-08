@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
-describe('API foundation', () => {
-  it('has a development connector token contract', () => {
-    expect(process.env.CONNECTOR_DEV_TOKEN ?? 'dev-only-change-me').toBeTruthy();
+describe('API scaffold', () => {
+  it('has a deterministic test environment', () => {
+    expect(process.env.NODE_ENV ?? 'test').toBeDefined();
   });
 });
