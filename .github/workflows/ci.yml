@@ -28,4 +28,9 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 8.0.x
-      - run: dotnet build apps/connector/TallyRemoteConnector.csproj
+      - run: dotnet publish apps/connector/TallyRemoteConnector.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o artifacts/tally-remote-connector
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tally-remote-connector-win-x64
+          path: artifacts/tally-remote-connector/
+          if-no-files-found: error
