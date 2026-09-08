@@ -4,8 +4,13 @@ import { prisma } from './prisma.js';
 const hashCredential = (credential: string) => createHash('sha256').update(credential).digest();
 
 function credentialMatches(candidate: string, expectedHex: string) {
+  let expectedHash: Buffer;
+  try {
+    expectedHash = Buffer.from(expectedHex, 'hex');
+  } catch {
+    return false;
+  }
   const candidateHash = hashCredential(candidate);
-  const expectedHash = Buffer.from(expectedHex, 'hex');
   return expectedHash.length === candidateHash.length && timingSafeEqual(candidateHash, expectedHash);
 }
 
@@ -29,12 +34,31 @@ export async function ensureDevOrganization(userId: string, organizationId: stri
 }
 
 export async function registerConnector(organizationId: string, deviceId: string, name: string) {
+  const existing = await prisma.connector.findUnique({ where: { deviceId } });
+  if (existing && existing.organizationId !== organizationId) {
+    throw new Error('CONNECTOR_OWNERSHIP_CONFLICT');
+  }
+
   const credential = randomBytes(32).toString('hex');
-  const connector = await prisma.connector.upsert({
-    where: { deviceId },
-    update: { name, organizationId, credentialHash: hashCredential(credential).toString('hex'), revokedAt: null, lastSeenAt: new Date() },
-    create: { deviceId, name, organizationId, credentialHash: hashCredential(credential).toString('hex'), lastSeenAt: new Date() },
-  });
+  const connector = existing
+    ? await prisma.connector.update({
+        where: { id: existing.id },
+        data: {
+          name,
+          credentialHash: hashCredential(credential).toString('hex'),
+          revokedAt: null,
+          lastSeenAt: new Date(),
+        },
+      })
+    : await prisma.connector.create({
+        data: {
+          deviceId,
+          name,
+          organizationId,
+          credentialHash: hashCredential(credential).toString('hex'),
+          lastSeenAt: new Date(),
+        },
+      });
   return { connector, credential };
 }
 
