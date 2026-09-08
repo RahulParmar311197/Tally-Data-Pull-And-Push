@@ -18,6 +18,7 @@ const Heartbeat = z.object({ type: z.literal('HEARTBEAT') });
 const Company = z.object({ type: z.literal('TALLY_COMPANY'), company: z.string().nullable() });
 const ReadResult = z.object({ type: z.literal('TALLY_READ_RESULT'), requestId: z.string(), operation: z.enum(['current_company', 'trial_balance']), ok: z.boolean(), data: z.unknown().optional(), error: z.string().optional() });
 type ConnectorState = { deviceId: string; connectedAt: number; lastSeen: number; socket: any; pending: Map<string, (value: unknown) => void> };
+type ConnectorRow = { deviceId: string; name: string; revokedAt: Date | null; lastSeenAt: Date | null };
 const connectors = new Map<string, ConnectorState>();
 
 app.get('/health', async () => ({ ok: true, service: 'tally-api', time: new Date().toISOString() }));
@@ -36,8 +37,8 @@ app.post('/api/connectors/register', async (request, reply) => {
 app.get('/api/connectors', async (request, reply) => {
   const identity = getDevIdentity(request);
   if (!identity) return reply.code(401).send({ error: 'UNAUTHORIZED' });
-  const rows = await prisma.connector.findMany({ where: { organizationId: identity.organizationId }, orderBy: { createdAt: 'asc' } });
-  return rows.map(c => ({ deviceId: c.deviceId, name: c.name, revoked: Boolean(c.revokedAt), connected: connectors.has(c.deviceId), lastSeenAt: c.lastSeenAt }));
+  const rows: ConnectorRow[] = await prisma.connector.findMany({ where: { organizationId: identity.organizationId }, orderBy: { createdAt: 'asc' } });
+  return rows.map((c: ConnectorRow) => ({ deviceId: c.deviceId, name: c.name, revoked: Boolean(c.revokedAt), connected: connectors.has(c.deviceId), lastSeenAt: c.lastSeenAt }));
 });
 
 app.post('/api/connectors/:deviceId/revoke', async (request, reply) => {
@@ -75,7 +76,7 @@ app.register(async instance => {
   instance.get('/ws/connector', { websocket: true }, (socket, request) => {
     let deviceId: string | undefined;
     const requestId = request.id;
-    socket.on('message', async raw => {
+    socket.on('message', async (raw: Buffer) => {
       try {
         const input = JSON.parse(raw.toString());
         if (!deviceId) {
