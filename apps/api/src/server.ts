@@ -38,7 +38,7 @@ app.get('/api/connectors', async (request, reply) => {
   const identity = getDevIdentity(request);
   if (!identity) return reply.code(401).send({ error: 'UNAUTHORIZED' });
   const rows = await prisma.connector.findMany({ where: { organizationId: identity.organizationId }, orderBy: { createdAt: 'asc' } });
-  return rows.map(c => ({ deviceId: c.deviceId, name: c.name, revoked: Boolean(c.revokedAt), connected: connectors.has(c.deviceId), lastSeenAt: c.lastSeenAt }));
+  return rows.map((c: { deviceId: string; name: string; revokedAt: Date | null; lastSeenAt: Date | null }) => ({ deviceId: c.deviceId, name: c.name, revoked: Boolean(c.revokedAt), connected: connectors.has(c.deviceId), lastSeenAt: c.lastSeenAt }));
 });
 
 app.post('/api/connectors/:deviceId/revoke', async (request, reply) => {
@@ -82,7 +82,7 @@ app.register(async instance => {
   instance.get('/ws/connector', { websocket: true }, (socket, request) => {
     let deviceId: string | undefined;
     const requestId = request.id;
-    socket.on('message', async raw => {
+    socket.on('message', async (raw: Buffer) => {
       try {
         const input = JSON.parse(raw.toString());
         if (!deviceId) {
