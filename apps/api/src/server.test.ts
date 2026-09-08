@@ -1,10 +1,9 @@
+import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { tokenMatches } from './auth.js';
 
 function sha256Hex(value: string) {
-  return Array.from(new Uint8Array(new TextEncoder().encode(value)))
-    .map(value => value.toString(16).padStart(2, '0'))
-    .join('');
+  return createHash('sha256').update(value).digest('hex');
 }
 
 describe('connector authentication primitives', () => {
