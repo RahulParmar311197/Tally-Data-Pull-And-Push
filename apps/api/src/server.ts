@@ -29,9 +29,14 @@ app.post('/api/connectors/register', async (request, reply) => {
   const input = Register.safeParse(request.body);
   if (!input.success) return reply.code(400).send({ error: 'INVALID_REQUEST', details: input.error.flatten() });
   await ensureDevOrganization(identity.userId, identity.organizationId);
-  const result = await registerConnector(identity.organizationId, input.data.deviceId, input.data.name);
-  await prisma.auditLog.create({ data: { organizationId: identity.organizationId, actorUserId: identity.userId, action: 'CONNECTOR_REGISTERED', resourceType: 'Connector', resourceId: result.connector.id, requestId: request.id, metadataJson: { deviceId: input.data.deviceId } } });
-  return { deviceId: result.connector.deviceId, name: result.connector.name, credential: result.credential };
+  try {
+    const result = await registerConnector(identity.organizationId, input.data.deviceId, input.data.name);
+    await prisma.auditLog.create({ data: { organizationId: identity.organizationId, actorUserId: identity.userId, action: 'CONNECTOR_REGISTERED', resourceType: 'Connector', resourceId: result.connector.id, requestId: request.id, metadataJson: { deviceId: input.data.deviceId } } });
+    return { deviceId: result.connector.deviceId, name: result.connector.name, credential: result.credential };
+  } catch (error) {
+    if (error instanceof Error && error.message === 'CONNECTOR_OWNERSHIP_CONFLICT') return reply.code(409).send({ error: 'CONNECTOR_OWNERSHIP_CONFLICT' });
+    throw error;
+  }
 });
 
 app.get('/api/connectors', async (request, reply) => {
