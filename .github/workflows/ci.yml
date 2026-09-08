@@ -16,6 +16,7 @@ jobs:
           node-version: 20
           cache: npm
       - run: npm install
+      - run: npm run prisma:validate --workspace=@tally/api
       - run: npm run build:api
       - run: npm test
 
