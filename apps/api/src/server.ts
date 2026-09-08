@@ -90,14 +90,16 @@ app.register(async instance => {
           if (!auth.success) { socket.send(JSON.stringify({ type: 'ERROR', code: 'UNAUTHORIZED', requestId })); socket.close(); return; }
           const connector = await authenticateConnector(auth.data.deviceId, auth.data.token);
           if (!connector || connector.name !== auth.data.deviceName) { socket.send(JSON.stringify({ type: 'ERROR', code: 'UNAUTHORIZED', requestId })); socket.close(); return; }
-          deviceId = connector.deviceId;
-          connectors.get(deviceId)?.socket.close();
-          connectors.set(deviceId, { deviceId, connectedAt: Date.now(), lastSeen: Date.now(), socket, pending: new Map() });
+          const authenticatedDeviceId = connector.deviceId;
+          deviceId = authenticatedDeviceId;
+          connectors.get(authenticatedDeviceId)?.socket.close();
+          connectors.set(authenticatedDeviceId, { deviceId: authenticatedDeviceId, connectedAt: Date.now(), lastSeen: Date.now(), socket, pending: new Map() });
           await prisma.connector.update({ where: { id: connector.id }, data: { lastSeenAt: new Date() } });
-          socket.send(JSON.stringify({ type: 'AUTH_OK', deviceId, requestId }));
+          socket.send(JSON.stringify({ type: 'AUTH_OK', deviceId: authenticatedDeviceId, requestId }));
           return;
         }
-        const current = connectors.get(deviceId);
+        const currentDeviceId = deviceId;
+        const current = connectors.get(currentDeviceId);
         const readResult = ReadResult.safeParse(input);
         if (readResult.success) {
           const pending = current?.pending.get(readResult.data.requestId);
@@ -111,13 +113,13 @@ app.register(async instance => {
         const heartbeat = Heartbeat.safeParse(input);
         if (heartbeat.success) {
           if (current) current.lastSeen = Date.now();
-          await prisma.connector.updateMany({ where: { deviceId, revokedAt: null }, data: { lastSeenAt: new Date() } });
+          await prisma.connector.updateMany({ where: { deviceId: currentDeviceId, revokedAt: null }, data: { lastSeenAt: new Date() } });
           socket.send(JSON.stringify({ type: 'HEARTBEAT_ACK', ts: Date.now() }));
           return;
         }
         const company = Company.safeParse(input);
         if (company.success) {
-          const connector = await prisma.connector.findUnique({ where: { deviceId } });
+          const connector = await prisma.connector.findUnique({ where: { deviceId: currentDeviceId } });
           if (!connector || connector.revokedAt) { socket.close(); return; }
           if (company.data.company) await prisma.tallyCompany.upsert({ where: { connectorId_name: { connectorId: connector.id, name: company.data.company } }, update: { lastSeenAt: new Date() }, create: { name: company.data.company, organizationId: connector.organizationId, connectorId: connector.id, lastSeenAt: new Date() } });
           await prisma.connector.update({ where: { id: connector.id }, data: { lastSeenAt: new Date() } });
