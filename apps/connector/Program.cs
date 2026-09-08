@@ -6,10 +6,16 @@ using System.Text.RegularExpressions;
 
 var apiWs = Environment.GetEnvironmentVariable("TALLY_API_WS") ?? "ws://127.0.0.1:4000/ws/connector";
 var tallyUrl = Environment.GetEnvironmentVariable("TALLY_URL") ?? "http://127.0.0.1:9000/";
-var token = Environment.GetEnvironmentVariable("CONNECTOR_TOKEN") ?? "dev-only-change-me";
+var credential = Environment.GetEnvironmentVariable("CONNECTOR_CREDENTIAL") ?? "";
 var deviceName = Environment.GetEnvironmentVariable("CONNECTOR_NAME") ?? Environment.MachineName;
 var deviceId = LoadDeviceId();
 Console.WriteLine($"Tally connector {deviceId} -> {apiWs}");
+
+if (string.IsNullOrWhiteSpace(credential))
+{
+    Console.Error.WriteLine("CONNECTOR_CREDENTIAL is required. Register this device with the API and set the returned credential as a user environment variable.");
+    return;
+}
 
 using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
 var reader = new TallyReader(http, tallyUrl);
@@ -20,7 +26,7 @@ while (true)
     try
     {
         await ws.ConnectAsync(new Uri(apiWs), CancellationToken.None);
-        await Send(ws, new { type = "AUTH", deviceId, deviceName, token });
+        await Send(ws, new { type = "AUTH", deviceId, deviceName, token = credential });
         var authOk = await ReceiveOne(ws, new byte[16 * 1024]);
         Console.WriteLine($"API: {authOk}");
         if (!authOk.Contains("AUTH_OK", StringComparison.Ordinal)) throw new WebSocketException("Connector authentication failed");
