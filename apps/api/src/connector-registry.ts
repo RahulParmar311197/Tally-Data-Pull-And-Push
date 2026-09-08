@@ -1,18 +1,8 @@
-import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { prisma } from './prisma.js';
+import { tokenMatches } from './auth.js';
 
-const hashCredential = (credential: string) => createHash('sha256').update(credential).digest();
-
-function credentialMatches(candidate: string, expectedHex: string) {
-  let expectedHash: Buffer;
-  try {
-    expectedHash = Buffer.from(expectedHex, 'hex');
-  } catch {
-    return false;
-  }
-  const candidateHash = hashCredential(candidate);
-  return expectedHash.length === candidateHash.length && timingSafeEqual(candidateHash, expectedHash);
-}
+const hashCredential = (credential: string) => createHash('sha256').update(credential).digest('hex');
 
 export async function ensureDevOrganization(userId: string, organizationId: string) {
   const user = await prisma.user.upsert({
@@ -43,27 +33,16 @@ export async function registerConnector(organizationId: string, deviceId: string
   const connector = existing
     ? await prisma.connector.update({
         where: { id: existing.id },
-        data: {
-          name,
-          credentialHash: hashCredential(credential).toString('hex'),
-          revokedAt: null,
-          lastSeenAt: new Date(),
-        },
+        data: { name, credentialHash: hashCredential(credential), revokedAt: null, lastSeenAt: new Date() },
       })
     : await prisma.connector.create({
-        data: {
-          deviceId,
-          name,
-          organizationId,
-          credentialHash: hashCredential(credential).toString('hex'),
-          lastSeenAt: new Date(),
-        },
+        data: { deviceId, name, organizationId, credentialHash: hashCredential(credential), lastSeenAt: new Date() },
       });
   return { connector, credential };
 }
 
 export async function authenticateConnector(deviceId: string, credential: string) {
   const connector = await prisma.connector.findUnique({ where: { deviceId } });
-  if (!connector || connector.revokedAt || !credentialMatches(credential, connector.credentialHash)) return null;
+  if (!connector || connector.revokedAt || !tokenMatches(credential, connector.credentialHash)) return null;
   return connector;
 }
