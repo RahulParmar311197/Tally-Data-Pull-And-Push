@@ -42,6 +42,7 @@ model Connector {
   deviceId       String       @unique
   name           String
   organizationId String
+  credentialHash String       @unique
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   revokedAt      DateTime?
   lastSeenAt     DateTime?
