@@ -42,12 +42,10 @@ while (true)
                 await Send(ws, new { type = "HEARTBEAT" });
                 heartbeat = DateTime.UtcNow;
             }
-            var receiveTask = ws.ReceiveAsync(buffer, CancellationToken.None);
+            var receiveTask = ReceiveOne(ws, buffer);
             var completed = await Task.WhenAny(receiveTask, Task.Delay(1000));
             if (completed != receiveTask) continue;
-            var result = await receiveTask;
-            if (result.MessageType == WebSocketMessageType.Close) break;
-            var message = Encoding.UTF8.GetString(buffer, 0, result.Count);
+            var message = await receiveTask;
             await HandleApiMessage(ws, message, reader);
         }
     }
@@ -75,6 +73,15 @@ static async Task HandleApiMessage(ClientWebSocket ws, string message, TallyRead
     catch (Exception ex)
     {
         Console.WriteLine($"Tally read error: {ex.Message}");
+        try
+        {
+            using var doc = JsonDocument.Parse(message);
+            var requestId = doc.RootElement.TryGetProperty("requestId", out var id) ? id.GetString() ?? "" : "";
+            var operation = doc.RootElement.TryGetProperty("operation", out var op) ? op.GetString() ?? "" : "";
+            if (!string.IsNullOrWhiteSpace(requestId))
+                await Send(ws, new { type = "TALLY_READ_RESULT", requestId, operation, ok = false, error = ex.Message });
+        }
+        catch { }
     }
 }
 
