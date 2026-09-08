@@ -1,0 +1,79 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id          String             @id @default(cuid())
+  email       String             @unique
+  displayName String?
+  memberships OrganizationMember[]
+  createdAt   DateTime           @default(now())
+  updatedAt   DateTime           @updatedAt
+}
+
+model Organization {
+  id          String             @id @default(cuid())
+  name        String
+  memberships OrganizationMember[]
+  connectors  Connector[]
+  companies   TallyCompany[]
+  createdAt   DateTime           @default(now())
+  updatedAt   DateTime           @updatedAt
+}
+
+model OrganizationMember {
+  organizationId String
+  userId         String
+  role           String           @default("member")
+  organization   Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user           User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt      DateTime         @default(now())
+
+  @@id([organizationId, userId])
+}
+
+model Connector {
+  id             String       @id @default(cuid())
+  deviceId       String       @unique
+  name           String
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  revokedAt      DateTime?
+  lastSeenAt     DateTime?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+  companies      TallyCompany[]
+}
+
+model TallyCompany {
+  id             String       @id @default(cuid())
+  name           String
+  organizationId String
+  connectorId    String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  connector      Connector    @relation(fields: [connectorId], references: [id], onDelete: Cascade)
+  lastSeenAt     DateTime?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  @@unique([connectorId, name])
+}
+
+model AuditLog {
+  id             String   @id @default(cuid())
+  organizationId String
+  actorUserId    String?
+  action         String
+  resourceType   String
+  resourceId     String?
+  requestId      String?
+  metadataJson   Json?
+  createdAt      DateTime @default(now())
+
+  @@index([organizationId, createdAt])
+}
