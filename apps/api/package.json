@@ -14,16 +14,16 @@
   "dependencies": {
     "@fastify/cors": "latest",
     "@fastify/websocket": "latest",
-    "@prisma/client": "latest",
+    "@prisma/client": "6.19.0",
     "fastify": "latest",
     "zod": "latest"
   },
   "devDependencies": {
     "@types/node": "latest",
-    "prisma": "7.1.0",
+    "prisma": "6.19.0",
     "tsx": "latest",
     "typescript": "latest",
     "vitest": "latest"
   },
-  "engines": { "node": ">=22.18" }
+  "engines": { "node": ">=20" }
 }
