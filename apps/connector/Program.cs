@@ -1,8 +1,6 @@
-using System.Net;
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
-using System.Text.RegularExpressions;
 
 var apiWs = Environment.GetEnvironmentVariable("TALLY_API_WS") ?? "ws://127.0.0.1:4000/ws/connector";
 var tallyUrl = Environment.GetEnvironmentVariable("TALLY_URL") ?? "http://127.0.0.1:9000/";
@@ -44,7 +42,6 @@ while (true)
                 await Send(ws, new { type = "HEARTBEAT" });
                 heartbeat = DateTime.UtcNow;
             }
-            if (ws.State != WebSocketState.Open) break;
             var receiveTask = ws.ReceiveAsync(buffer, CancellationToken.None);
             var completed = await Task.WhenAny(receiveTask, Task.Delay(1000));
             if (completed != receiveTask) continue;
@@ -75,7 +72,10 @@ static async Task HandleApiMessage(ClientWebSocket ws, string message, TallyRead
         var ok = operation is "current_company" or "trial_balance" && data is not null;
         await Send(ws, new { type = "TALLY_READ_RESULT", requestId, operation, ok, data, error = ok ? null : "TALLY_READ_FAILED" });
     }
-    catch { }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"Tally read error: {ex.Message}");
+    }
 }
 
 static string LoadDeviceId()
@@ -84,7 +84,9 @@ static string LoadDeviceId()
     Directory.CreateDirectory(dir);
     var path = Path.Combine(dir, "device-id.txt");
     if (File.Exists(path)) return File.ReadAllText(path).Trim();
-    var id = Guid.NewGuid().ToString("N"); File.WriteAllText(path, id); return id;
+    var id = Guid.NewGuid().ToString("N");
+    File.WriteAllText(path, id);
+    return id;
 }
 
 static async Task Send(ClientWebSocket ws, object value)
@@ -95,27 +97,13 @@ static async Task Send(ClientWebSocket ws, object value)
 
 static async Task<string> ReceiveOne(ClientWebSocket ws, byte[] buffer)
 {
-    using var stream = new MemoryStream(); WebSocketReceiveResult result;
-    do { result = await ws.ReceiveAsync(buffer, CancellationToken.None); if (result.MessageType == WebSocketMessageType.Close) throw new WebSocketException("API closed connection"); stream.Write(buffer, 0, result.Count); } while (!result.EndOfMessage);
-    return Encoding.UTF8.GetString(stream.ToArray());
-}
-
-public sealed class TallyReader
-{
-    private readonly HttpClient http; private readonly string url;
-    public TallyReader(HttpClient http, string url) { this.http = http; this.url = url; }
-    public Task<string?> CurrentCompany() => Execute("TallyRemoteCurrentCompany", "##SVCurrentCompany", "TALLYREMOTECURRENTCOMPANY");
-    public Task<string?> TrialBalance() => Execute("TallyRemoteTrialBalance", "$$SysName:Name", "DSPACCNAME");
-    private async Task<string?> Execute(string report, string expression, string tag)
+    using var stream = new MemoryStream();
+    WebSocketReceiveResult result;
+    do
     {
-        var xml = $"""
-<ENVELOPE><HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Data</TYPE><ID>{report}</ID></HEADER><BODY><DESC><TDL><TDLMESSAGE>
-<REPORT NAME="{report}" ISMODIFY="No" ISFIXED="No"><FORMS>{report}</FORMS></REPORT><FORM NAME="{report}" ISMODIFY="No" ISFIXED="No"><PARTS>{report}</PARTS></FORM><PART NAME="{report}" ISMODIFY="No" ISFIXED="No"><LINES>{report}</LINES></PART><LINE NAME="{report}" ISMODIFY="No" ISFIXED="No"><FIELDS>{report}</FIELDS></LINE><FIELD NAME="{report}" ISMODIFY="No" ISFIXED="No"><SET>{expression}</SET></FIELD>
-</TDLMESSAGE></TDL></DESC></BODY></ENVELOPE>
-""";
-        using var response = await http.PostAsync(url, new StringContent(xml, Encoding.UTF8, "text/xml")); response.EnsureSuccessStatusCode();
-        var body = await response.Content.ReadAsStringAsync();
-        var match = Regex.Match(body, $"<{Regex.Escape(tag)}[^>]*>(.*?)</{Regex.Escape(tag)}>", RegexOptions.IgnoreCase | RegexOptions.Singleline);
-        return match.Success ? WebUtility.HtmlDecode(match.Groups[1].Value.Trim()) : null;
-    }
+        result = await ws.ReceiveAsync(buffer, CancellationToken.None);
+        if (result.MessageType == WebSocketMessageType.Close) throw new WebSocketException("API closed connection");
+        stream.Write(buffer, 0, result.Count);
+    } while (!result.EndOfMessage);
+    return Encoding.UTF8.GetString(stream.ToArray());
 }
