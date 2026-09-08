@@ -129,14 +129,14 @@ app.register(async instance => {
       } catch { socket.send(JSON.stringify({ type: 'ERROR', code: 'INVALID_MESSAGE', requestId })); }
     });
     socket.on('close', () => {
-      if (deviceId && connectors.get(deviceId)?.socket === socket) {
-        const state = connectors.get(deviceId);
-        for (const pending of state?.pending.values() ?? []) {
-          clearTimeout(pending.timer);
-          pending.reject(new Error('CONNECTOR_DISCONNECTED'));
-        }
-        connectors.delete(deviceId);
+      const closedDeviceId = deviceId;
+      if (!closedDeviceId || connectors.get(closedDeviceId)?.socket !== socket) return;
+      const state = connectors.get(closedDeviceId);
+      for (const pending of state?.pending.values() ?? []) {
+        clearTimeout(pending.timer);
+        pending.reject(new Error('CONNECTOR_DISCONNECTED'));
       }
+      connectors.delete(closedDeviceId);
     });
   });
 });
