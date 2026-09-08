@@ -17,8 +17,8 @@ const Read = z.object({ operation: z.enum(['current_company', 'trial_balance']) 
 const Heartbeat = z.object({ type: z.literal('HEARTBEAT') });
 const Company = z.object({ type: z.literal('TALLY_COMPANY'), company: z.string().nullable() });
 const ReadResult = z.object({ type: z.literal('TALLY_READ_RESULT'), requestId: z.string(), operation: z.enum(['current_company', 'trial_balance']), ok: z.boolean(), data: z.unknown().optional(), error: z.string().optional() });
-type ConnectorState = { deviceId: string; connectedAt: number; lastSeen: number; socket: any; pending: Map<string, (value: unknown) => void> };
-type ConnectorRow = { deviceId: string; name: string; revokedAt: Date | null; lastSeenAt: Date | null };
+type PendingRequest = { resolve: (value: unknown) => void; reject: (reason: Error) => void; timer: ReturnType<typeof setTimeout> };
+type ConnectorState = { deviceId: string; connectedAt: number; lastSeen: number; socket: any; pending: Map<string, PendingRequest> };
 const connectors = new Map<string, ConnectorState>();
 
 app.get('/health', async () => ({ ok: true, service: 'tally-api', time: new Date().toISOString() }));
@@ -37,8 +37,8 @@ app.post('/api/connectors/register', async (request, reply) => {
 app.get('/api/connectors', async (request, reply) => {
   const identity = getDevIdentity(request);
   if (!identity) return reply.code(401).send({ error: 'UNAUTHORIZED' });
-  const rows: ConnectorRow[] = await prisma.connector.findMany({ where: { organizationId: identity.organizationId }, orderBy: { createdAt: 'asc' } });
-  return rows.map((c: ConnectorRow) => ({ deviceId: c.deviceId, name: c.name, revoked: Boolean(c.revokedAt), connected: connectors.has(c.deviceId), lastSeenAt: c.lastSeenAt }));
+  const rows = await prisma.connector.findMany({ where: { organizationId: identity.organizationId }, orderBy: { createdAt: 'asc' } });
+  return rows.map(c => ({ deviceId: c.deviceId, name: c.name, revoked: Boolean(c.revokedAt), connected: connectors.has(c.deviceId), lastSeenAt: c.lastSeenAt }));
 });
 
 app.post('/api/connectors/:deviceId/revoke', async (request, reply) => {
@@ -65,8 +65,14 @@ app.post('/api/connectors/:deviceId/read', async (request, reply) => {
   const requestId = request.id;
   const result = await new Promise<unknown>((resolve, reject) => {
     const timer = setTimeout(() => { state.pending.delete(requestId); reject(new Error('CONNECTOR_TIMEOUT')); }, 15000);
-    state.pending.set(requestId, value => { clearTimeout(timer); resolve(value); });
-    state.socket.send(JSON.stringify({ type: 'TALLY_READ', requestId, operation: input.data.operation }));
+    state.pending.set(requestId, { resolve, reject, timer });
+    try {
+      state.socket.send(JSON.stringify({ type: 'TALLY_READ', requestId, operation: input.data.operation }));
+    } catch (error) {
+      clearTimeout(timer);
+      state.pending.delete(requestId);
+      reject(error instanceof Error ? error : new Error('CONNECTOR_SEND_FAILED'));
+    }
   }).catch(error => ({ error: error instanceof Error ? error.message : 'CONNECTOR_ERROR' }));
   if ((result as { error?: string }).error) return reply.code(504).send(result);
   return result;
@@ -76,7 +82,7 @@ app.register(async instance => {
   instance.get('/ws/connector', { websocket: true }, (socket, request) => {
     let deviceId: string | undefined;
     const requestId = request.id;
-    socket.on('message', async (raw: Buffer) => {
+    socket.on('message', async raw => {
       try {
         const input = JSON.parse(raw.toString());
         if (!deviceId) {
@@ -93,7 +99,15 @@ app.register(async instance => {
         }
         const current = connectors.get(deviceId);
         const readResult = ReadResult.safeParse(input);
-        if (readResult.success) { current?.pending.get(readResult.data.requestId)?.(readResult.data); current?.pending.delete(readResult.data.requestId); return; }
+        if (readResult.success) {
+          const pending = current?.pending.get(readResult.data.requestId);
+          if (pending) {
+            clearTimeout(pending.timer);
+            current?.pending.delete(readResult.data.requestId);
+            pending.resolve(readResult.data);
+          }
+          return;
+        }
         const heartbeat = Heartbeat.safeParse(input);
         if (heartbeat.success) {
           if (current) current.lastSeen = Date.now();
@@ -112,7 +126,16 @@ app.register(async instance => {
         socket.send(JSON.stringify({ type: 'ERROR', code: 'INVALID_MESSAGE', requestId }));
       } catch { socket.send(JSON.stringify({ type: 'ERROR', code: 'INVALID_MESSAGE', requestId })); }
     });
-    socket.on('close', () => { if (deviceId && connectors.get(deviceId)?.socket === socket) connectors.delete(deviceId); });
+    socket.on('close', () => {
+      if (deviceId && connectors.get(deviceId)?.socket === socket) {
+        const state = connectors.get(deviceId);
+        for (const pending of state?.pending.values() ?? []) {
+          clearTimeout(pending.timer);
+          pending.reject(new Error('CONNECTOR_DISCONNECTED'));
+        }
+        connectors.delete(deviceId);
+      }
+    });
   });
 });
 
