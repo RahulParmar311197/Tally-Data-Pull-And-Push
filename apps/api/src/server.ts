@@ -3,37 +3,70 @@ import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import websocket from '@fastify/websocket';
 import { z } from 'zod';
+import { prisma } from './prisma.js';
+import { getDevIdentity } from './request-auth.js';
+import { authenticateConnector, ensureDevOrganization, registerConnector } from './connector-registry.js';
 
 const app = Fastify({ logger: true, genReqId: () => randomUUID() });
 await app.register(cors, { origin: process.env.WEB_ORIGIN ?? true });
 await app.register(websocket);
 
-const ConnectorAuth = z.object({ type: z.literal('AUTH'), deviceId: z.string().min(8), deviceName: z.string().min(1).max(120), token: z.string().min(1) });
+const ConnectorAuth = z.object({ type: z.literal('AUTH'), deviceId: z.string().min(8).max(100), deviceName: z.string().min(1).max(120), token: z.string().min(32).max(128) });
+const Register = z.object({ deviceId: z.string().min(8).max(100), name: z.string().min(1).max(120) });
 const Heartbeat = z.object({ type: z.literal('HEARTBEAT') });
 const Company = z.object({ type: z.literal('TALLY_COMPANY'), company: z.string().nullable() });
-type ConnectorState = { deviceId: string; name: string; connectedAt: number; lastSeen: number; company: string | null; socket: any };
+type ConnectorState = { deviceId: string; connectedAt: number; lastSeen: number; socket: any };
 const connectors = new Map<string, ConnectorState>();
-const devToken = process.env.CONNECTOR_DEV_TOKEN ?? 'dev-only-change-me';
 
 app.get('/health', async () => ({ ok: true, service: 'tally-api', time: new Date().toISOString() }));
-app.get('/api/connectors', async () => Array.from(connectors.values()).map(({ socket: _socket, ...c }) => ({ ...c, status: Date.now() - c.lastSeen < 30_000 ? 'online' : 'offline' })));
+
+app.post('/api/connectors/register', async (request, reply) => {
+  const identity = getDevIdentity(request);
+  if (!identity) return reply.code(401).send({ error: 'UNAUTHORIZED' });
+  const input = Register.safeParse(request.body);
+  if (!input.success) return reply.code(400).send({ error: 'INVALID_REQUEST', details: input.error.flatten() });
+  await ensureDevOrganization(identity.userId, identity.organizationId);
+  const result = await registerConnector(identity.organizationId, input.data.deviceId, input.data.name);
+  await prisma.auditLog.create({ data: { organizationId: identity.organizationId, actorUserId: identity.userId, action: 'CONNECTOR_REGISTERED', resourceType: 'Connector', resourceId: result.connector.id, requestId: request.id, metadataJson: { deviceId: input.data.deviceId } } });
+  return { deviceId: result.connector.deviceId, name: result.connector.name, credential: result.credential };
+});
+
+app.get('/api/connectors', async (request, reply) => {
+  const identity = getDevIdentity(request);
+  if (!identity) return reply.code(401).send({ error: 'UNAUTHORIZED' });
+  const rows = await prisma.connector.findMany({ where: { organizationId: identity.organizationId }, orderBy: { createdAt: 'asc' } });
+  return rows.map(c => ({ deviceId: c.deviceId, name: c.name, revoked: Boolean(c.revokedAt), connected: connectors.has(c.deviceId), lastSeenAt: c.lastSeenAt }));
+});
+
+app.post('/api/connectors/:deviceId/revoke', async (request, reply) => {
+  const identity = getDevIdentity(request);
+  if (!identity) return reply.code(401).send({ error: 'UNAUTHORIZED' });
+  const deviceId = String((request.params as { deviceId?: string }).deviceId ?? '');
+  const connector = await prisma.connector.findFirst({ where: { deviceId, organizationId: identity.organizationId } });
+  if (!connector) return reply.code(404).send({ error: 'NOT_FOUND' });
+  await prisma.connector.update({ where: { id: connector.id }, data: { revokedAt: new Date() } });
+  connectors.get(deviceId)?.socket.close();
+  await prisma.auditLog.create({ data: { organizationId: identity.organizationId, actorUserId: identity.userId, action: 'CONNECTOR_REVOKED', resourceType: 'Connector', resourceId: connector.id, requestId: request.id } });
+  return { ok: true };
+});
 
 app.register(async instance => {
   instance.get('/ws/connector', { websocket: true }, (socket, request) => {
     let deviceId: string | undefined;
     const requestId = request.id;
-    socket.on('message', raw => {
+    socket.on('message', async raw => {
       try {
         const input = JSON.parse(raw.toString());
         if (!deviceId) {
           const auth = ConnectorAuth.safeParse(input);
-          if (!auth.success || auth.data.token !== devToken) {
-            socket.send(JSON.stringify({ type: 'ERROR', code: 'UNAUTHORIZED', requestId }));
-            socket.close();
-            return;
-          }
-          deviceId = auth.data.deviceId;
-          connectors.set(deviceId, { deviceId, name: auth.data.deviceName, connectedAt: Date.now(), lastSeen: Date.now(), company: null, socket });
+          if (!auth.success) { socket.send(JSON.stringify({ type: 'ERROR', code: 'UNAUTHORIZED', requestId })); socket.close(); return; }
+          const connector = await authenticateConnector(auth.data.deviceId, auth.data.token);
+          if (!connector || connector.name !== auth.data.deviceName) { socket.send(JSON.stringify({ type: 'ERROR', code: 'UNAUTHORIZED', requestId })); socket.close(); return; }
+          deviceId = connector.deviceId;
+          const previous = connectors.get(deviceId);
+          previous?.socket.close();
+          connectors.set(deviceId, { deviceId, connectedAt: Date.now(), lastSeen: Date.now(), socket });
+          await prisma.connector.update({ where: { id: connector.id }, data: { lastSeenAt: new Date() } });
           socket.send(JSON.stringify({ type: 'AUTH_OK', deviceId, requestId }));
           return;
         }
@@ -41,21 +74,24 @@ app.register(async instance => {
         if (heartbeat.success) {
           const current = connectors.get(deviceId);
           if (current) current.lastSeen = Date.now();
+          await prisma.connector.updateMany({ where: { deviceId, revokedAt: null }, data: { lastSeenAt: new Date() } });
           socket.send(JSON.stringify({ type: 'HEARTBEAT_ACK', ts: Date.now() }));
           return;
         }
         const company = Company.safeParse(input);
         if (company.success) {
-          const current = connectors.get(deviceId);
-          if (current) { current.company = company.data.company; current.lastSeen = Date.now(); }
+          const connector = await prisma.connector.findUnique({ where: { deviceId } });
+          if (!connector || connector.revokedAt) { socket.close(); return; }
+          if (company.data.company) {
+            await prisma.tallyCompany.upsert({ where: { connectorId_name: { connectorId: connector.id, name: company.data.company } }, update: { lastSeenAt: new Date() }, create: { name: company.data.company, organizationId: connector.organizationId, connectorId: connector.id, lastSeenAt: new Date() } });
+          }
+          await prisma.connector.update({ where: { id: connector.id }, data: { lastSeenAt: new Date() } });
           return;
         }
         socket.send(JSON.stringify({ type: 'ERROR', code: 'INVALID_MESSAGE', requestId }));
-      } catch {
-        socket.send(JSON.stringify({ type: 'ERROR', code: 'INVALID_JSON', requestId }));
-      }
+      } catch { socket.send(JSON.stringify({ type: 'ERROR', code: 'INVALID_MESSAGE', requestId })); }
     });
-    socket.on('close', () => { if (deviceId) connectors.delete(deviceId); });
+    socket.on('close', () => { if (deviceId && connectors.get(deviceId)?.socket === socket) connectors.delete(deviceId); });
   });
 });
 
