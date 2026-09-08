@@ -13,9 +13,11 @@ await app.register(websocket);
 
 const ConnectorAuth = z.object({ type: z.literal('AUTH'), deviceId: z.string().min(8).max(100), deviceName: z.string().min(1).max(120), token: z.string().min(32).max(128) });
 const Register = z.object({ deviceId: z.string().min(8).max(100), name: z.string().min(1).max(120) });
+const Read = z.object({ operation: z.enum(['current_company', 'trial_balance']) });
 const Heartbeat = z.object({ type: z.literal('HEARTBEAT') });
 const Company = z.object({ type: z.literal('TALLY_COMPANY'), company: z.string().nullable() });
-type ConnectorState = { deviceId: string; connectedAt: number; lastSeen: number; socket: any };
+const ReadResult = z.object({ type: z.literal('TALLY_READ_RESULT'), requestId: z.string(), operation: z.enum(['current_company', 'trial_balance']), ok: z.boolean(), data: z.unknown().optional(), error: z.string().optional() });
+type ConnectorState = { deviceId: string; connectedAt: number; lastSeen: number; socket: any; pending: Map<string, (value: unknown) => void> };
 const connectors = new Map<string, ConnectorState>();
 
 app.get('/health', async () => ({ ok: true, service: 'tally-api', time: new Date().toISOString() }));
@@ -50,6 +52,25 @@ app.post('/api/connectors/:deviceId/revoke', async (request, reply) => {
   return { ok: true };
 });
 
+app.post('/api/connectors/:deviceId/read', async (request, reply) => {
+  const identity = getDevIdentity(request);
+  if (!identity) return reply.code(401).send({ error: 'UNAUTHORIZED' });
+  const input = Read.safeParse(request.body);
+  if (!input.success) return reply.code(400).send({ error: 'INVALID_REQUEST', details: input.error.flatten() });
+  const deviceId = String((request.params as { deviceId?: string }).deviceId ?? '');
+  const connector = await prisma.connector.findFirst({ where: { deviceId, organizationId: identity.organizationId, revokedAt: null } });
+  const state = connector ? connectors.get(deviceId) : undefined;
+  if (!connector || !state) return reply.code(409).send({ error: 'CONNECTOR_OFFLINE' });
+  const requestId = request.id;
+  const result = await new Promise<unknown>((resolve, reject) => {
+    const timer = setTimeout(() => { state.pending.delete(requestId); reject(new Error('CONNECTOR_TIMEOUT')); }, 15000);
+    state.pending.set(requestId, value => { clearTimeout(timer); resolve(value); });
+    state.socket.send(JSON.stringify({ type: 'TALLY_READ', requestId, operation: input.data.operation }));
+  }).catch(error => ({ error: error instanceof Error ? error.message : 'CONNECTOR_ERROR' }));
+  if ((result as { error?: string }).error) return reply.code(504).send(result);
+  return result;
+});
+
 app.register(async instance => {
   instance.get('/ws/connector', { websocket: true }, (socket, request) => {
     let deviceId: string | undefined;
@@ -63,16 +84,17 @@ app.register(async instance => {
           const connector = await authenticateConnector(auth.data.deviceId, auth.data.token);
           if (!connector || connector.name !== auth.data.deviceName) { socket.send(JSON.stringify({ type: 'ERROR', code: 'UNAUTHORIZED', requestId })); socket.close(); return; }
           deviceId = connector.deviceId;
-          const previous = connectors.get(deviceId);
-          previous?.socket.close();
-          connectors.set(deviceId, { deviceId, connectedAt: Date.now(), lastSeen: Date.now(), socket });
+          connectors.get(deviceId)?.socket.close();
+          connectors.set(deviceId, { deviceId, connectedAt: Date.now(), lastSeen: Date.now(), socket, pending: new Map() });
           await prisma.connector.update({ where: { id: connector.id }, data: { lastSeenAt: new Date() } });
           socket.send(JSON.stringify({ type: 'AUTH_OK', deviceId, requestId }));
           return;
         }
+        const current = connectors.get(deviceId);
+        const readResult = ReadResult.safeParse(input);
+        if (readResult.success) { current?.pending.get(readResult.data.requestId)?.(readResult.data); current?.pending.delete(readResult.data.requestId); return; }
         const heartbeat = Heartbeat.safeParse(input);
         if (heartbeat.success) {
-          const current = connectors.get(deviceId);
           if (current) current.lastSeen = Date.now();
           await prisma.connector.updateMany({ where: { deviceId, revokedAt: null }, data: { lastSeenAt: new Date() } });
           socket.send(JSON.stringify({ type: 'HEARTBEAT_ACK', ts: Date.now() }));
@@ -82,9 +104,7 @@ app.register(async instance => {
         if (company.success) {
           const connector = await prisma.connector.findUnique({ where: { deviceId } });
           if (!connector || connector.revokedAt) { socket.close(); return; }
-          if (company.data.company) {
-            await prisma.tallyCompany.upsert({ where: { connectorId_name: { connectorId: connector.id, name: company.data.company } }, update: { lastSeenAt: new Date() }, create: { name: company.data.company, organizationId: connector.organizationId, connectorId: connector.id, lastSeenAt: new Date() } });
-          }
+          if (company.data.company) await prisma.tallyCompany.upsert({ where: { connectorId_name: { connectorId: connector.id, name: company.data.company } }, update: { lastSeenAt: new Date() }, create: { name: company.data.company, organizationId: connector.organizationId, connectorId: connector.id, lastSeenAt: new Date() } });
           await prisma.connector.update({ where: { id: connector.id }, data: { lastSeenAt: new Date() } });
           return;
         }
