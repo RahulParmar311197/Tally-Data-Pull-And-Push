@@ -14,21 +14,33 @@ Console.WriteLine($"Tally connector {deviceId} -> {apiWs}");
 
 using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
 using var ws = new ClientWebSocket();
-await ws.ConnectAsync(new Uri(apiWs), CancellationToken.None);
-await Send(ws, new { type = "AUTH", deviceId, deviceName, token });
 
-var buffer = new byte[16 * 1024];
-var authOk = await ReceiveOne(ws, buffer);
-Console.WriteLine($"API: {authOk}");
-
-var tally = await ProbeTally(http, tallyUrl);
-Console.WriteLine($"Tally reachable: {tally.Reachable}; company: {tally.Company ?? "not detected"}");
-await Send(ws, new { type = "TALLY_COMPANY", company = tally.Company });
-
-while (ws.State == WebSocketState.Open)
+while (true)
 {
-    await Task.Delay(TimeSpan.FromSeconds(10));
-    await Send(ws, new { type = "HEARTBEAT" });
+    try
+    {
+        await ws.ConnectAsync(new Uri(apiWs), CancellationToken.None);
+        await Send(ws, new { type = "AUTH", deviceId, deviceName, token });
+        var authOk = await ReceiveOne(ws, new byte[16 * 1024]);
+        Console.WriteLine($"API: {authOk}");
+
+        var tally = await ProbeTally(http, tallyUrl);
+        Console.WriteLine($"Tally reachable: {tally.Reachable}; company: {tally.Company ?? "not detected"}");
+        await Send(ws, new { type = "TALLY_COMPANY", company = tally.Company });
+
+        while (ws.State == WebSocketState.Open)
+        {
+            await Task.Delay(TimeSpan.FromSeconds(10));
+            if (ws.State == WebSocketState.Open)
+                await Send(ws, new { type = "HEARTBEAT" });
+        }
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"Connector connection error: {ex.Message}");
+    }
+
+    await Task.Delay(TimeSpan.FromSeconds(5));
 }
 
 static string LoadDeviceId()
@@ -50,8 +62,16 @@ static async Task Send(ClientWebSocket ws, object value)
 
 static async Task<string> ReceiveOne(ClientWebSocket ws, byte[] buffer)
 {
-    var result = await ws.ReceiveAsync(buffer, CancellationToken.None);
-    return Encoding.UTF8.GetString(buffer, 0, result.Count);
+    using var stream = new MemoryStream();
+    WebSocketReceiveResult result;
+    do
+    {
+        result = await ws.ReceiveAsync(buffer, CancellationToken.None);
+        if (result.MessageType == WebSocketMessageType.Close)
+            throw new WebSocketException("API closed the connector connection");
+        stream.Write(buffer, 0, result.Count);
+    } while (!result.EndOfMessage);
+    return Encoding.UTF8.GetString(stream.ToArray());
 }
 
 static async Task<(bool Reachable, string? Company)> ProbeTally(HttpClient http, string url)
