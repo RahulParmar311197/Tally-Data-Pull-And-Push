@@ -61,13 +61,19 @@ static async Task HandleApiMessage(ClientWebSocket ws, string message, TallyRead
         if (!doc.RootElement.TryGetProperty("type", out var type) || type.GetString() != "TALLY_READ") return;
         var requestId = doc.RootElement.GetProperty("requestId").GetString() ?? "";
         var operation = doc.RootElement.GetProperty("operation").GetString() ?? "";
-        string? data = operation switch
+        if (operation is not ("current_company" or "trial_balance"))
+        {
+            await Send(ws, new { type = "TALLY_READ_RESULT", requestId, operation = "current_company", ok = false, error = "UNSUPPORTED_OPERATION" });
+            return;
+        }
+
+        object? data = operation switch
         {
             "current_company" => await reader.CurrentCompany(),
             "trial_balance" => await reader.TrialBalance(),
             _ => null,
         };
-        var ok = operation is "current_company" or "trial_balance" && data is not null;
+        var ok = data is not null;
         await Send(ws, new { type = "TALLY_READ_RESULT", requestId, operation, ok, data, error = ok ? null : "TALLY_READ_FAILED" });
     }
     catch (Exception ex)
